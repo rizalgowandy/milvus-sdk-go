@@ -12,9 +12,11 @@
 package entity
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/suite"
 )
 
 // ArrayRow test case type
@@ -55,13 +57,18 @@ type SliceBadDimStruct2 struct {
 }
 
 func TestParseSchema(t *testing.T) {
-
 	t.Run("invalid cases", func(t *testing.T) {
 		// anonymous struct with default collection name ("") will cause error
 		anonymusStruct := struct {
 			RowBase
 		}{}
 		sch, err := ParseSchema(anonymusStruct)
+		assert.Nil(t, sch)
+		assert.NotNil(t, err)
+
+		// MapRow
+		m := make(MapRow)
+		sch, err = ParseSchema(m)
 		assert.Nil(t, sch)
 		assert.NotNil(t, err)
 
@@ -100,14 +107,24 @@ func TestParseSchema(t *testing.T) {
 		sch, err = ParseSchema(&SliceBadDimStruct2{})
 		assert.Nil(t, sch)
 		assert.NotNil(t, err)
-
 	})
 
 	t.Run("valid cases", func(t *testing.T) {
-
 		sch, err := ParseSchema(RowBase{})
 		assert.Nil(t, err)
 		assert.Equal(t, "RowBase", sch.CollectionName)
+
+		getVectorField := func(schema *Schema) *Field {
+			for _, field := range schema.Fields {
+				if field.DataType == FieldTypeFloatVector ||
+					field.DataType == FieldTypeBinaryVector ||
+					field.DataType == FieldTypeBFloat16Vector ||
+					field.DataType == FieldTypeFloat16Vector {
+					return field
+				}
+			}
+			return nil
+		}
 
 		type ValidStruct struct {
 			RowBase
@@ -125,6 +142,44 @@ func TestParseSchema(t *testing.T) {
 		assert.Nil(t, err)
 		assert.NotNil(t, sch)
 		assert.Equal(t, "ValidStruct", sch.CollectionName)
+
+		type ValidFp16Struct struct {
+			RowBase
+			ID     int64 `milvus:"primary_key"`
+			Attr1  int8
+			Attr2  int16
+			Attr3  int32
+			Attr4  float32
+			Attr5  float64
+			Attr6  string
+			Vector []byte `milvus:"dim:128;vector_type:fp16"`
+		}
+		fp16Vs := &ValidFp16Struct{}
+		sch, err = ParseSchema(fp16Vs)
+		assert.Nil(t, err)
+		assert.NotNil(t, sch)
+		assert.Equal(t, "ValidFp16Struct", sch.CollectionName)
+		vectorField := getVectorField(sch)
+		assert.Equal(t, FieldTypeFloat16Vector, vectorField.DataType)
+
+		type ValidBf16Struct struct {
+			RowBase
+			ID     int64 `milvus:"primary_key"`
+			Attr1  int8
+			Attr2  int16
+			Attr3  int32
+			Attr4  float32
+			Attr5  float64
+			Attr6  string
+			Vector []byte `milvus:"dim:128;vector_type:bf16"`
+		}
+		bf16Vs := &ValidBf16Struct{}
+		sch, err = ParseSchema(bf16Vs)
+		assert.Nil(t, err)
+		assert.NotNil(t, sch)
+		assert.Equal(t, "ValidBf16Struct", sch.CollectionName)
+		vectorField = getVectorField(sch)
+		assert.Equal(t, FieldTypeBFloat16Vector, vectorField.DataType)
 
 		type ValidByteStruct struct {
 			RowBase
@@ -189,39 +244,82 @@ type ValidStruct struct {
 	Vector  []float32 `milvus:"dim:16"`
 	Vector2 []byte    `milvus:"dim:32"`
 }
+
 type ValidStruct2 struct {
 	RowBase
 	ID      int64 `milvus:"primary_key"`
 	Vector  [16]float32
 	Vector2 [4]byte
+	Ignored bool `milvus:"-"`
 }
+
 type ValidStructWithNamedTag struct {
 	RowBase
 	ID     int64       `milvus:"primary_key;name:id"`
 	Vector [16]float32 `milvus:"name:vector"`
 }
 
-func TestRowsToColumns(t *testing.T) {
-	t.Run("valid cases", func(t *testing.T) {
+type RowsSuite struct {
+	suite.Suite
+}
 
+func (s *RowsSuite) TestRowsToColumns() {
+	s.Run("valid_cases", func() {
 		columns, err := RowsToColumns([]Row{&ValidStruct{}})
-		assert.Nil(t, err)
-		assert.Equal(t, 10, len(columns))
+		s.Nil(err)
+		s.Equal(10, len(columns))
 
 		columns, err = RowsToColumns([]Row{&ValidStruct2{}})
-		assert.Nil(t, err)
-		assert.Equal(t, 3, len(columns))
-
+		s.Nil(err)
+		s.Equal(3, len(columns))
 	})
 
-	t.Run("invalid cases", func(t *testing.T) {
+	s.Run("auto_id_pk", func() {
+		type AutoPK struct {
+			RowBase
+			ID     int64     `milvus:"primary_key;auto_id"`
+			Vector []float32 `milvus:"dim:32"`
+		}
+		columns, err := RowsToColumns([]Row{&AutoPK{}})
+		s.Nil(err)
+		s.Require().Equal(1, len(columns))
+		s.Equal("Vector", columns[0].Name())
+	})
+
+	s.Run("fp16", func() {
+		type BF16Struct struct {
+			RowBase
+			ID     int64  `milvus:"primary_key;auto_id"`
+			Vector []byte `milvus:"dim:16;vector_type:bf16"`
+		}
+		columns, err := RowsToColumns([]Row{&BF16Struct{}})
+		s.Nil(err)
+		s.Require().Equal(1, len(columns))
+		s.Equal("Vector", columns[0].Name())
+		s.Equal(FieldTypeBFloat16Vector, columns[0].Type())
+	})
+
+	s.Run("fp16", func() {
+		type FP16Struct struct {
+			RowBase
+			ID     int64  `milvus:"primary_key;auto_id"`
+			Vector []byte `milvus:"dim:16;vector_type:fp16"`
+		}
+		columns, err := RowsToColumns([]Row{&FP16Struct{}})
+		s.Nil(err)
+		s.Require().Equal(1, len(columns))
+		s.Equal("Vector", columns[0].Name())
+		s.Equal(FieldTypeFloat16Vector, columns[0].Type())
+	})
+
+	s.Run("invalid_cases", func() {
 		// empty input
 		_, err := RowsToColumns([]Row{})
-		assert.NotNil(t, err)
+		s.NotNil(err)
 
 		// incompatible rows
 		_, err = RowsToColumns([]Row{&ValidStruct{}, &ValidStruct2{}})
-		assert.NotNil(t, err)
+		s.NotNil(err)
 
 		// schema & row not compatible
 		_, err = RowsToColumns([]Row{&ValidStruct{}}, &Schema{
@@ -232,6 +330,113 @@ func TestRowsToColumns(t *testing.T) {
 				},
 			},
 		})
-		assert.NotNil(t, err)
+		s.NotNil(err)
 	})
+}
+
+func (s *RowsSuite) TestDynamicSchema() {
+	s.Run("all_fallback_dynamic", func() {
+		columns, err := RowsToColumns([]Row{&ValidStruct{}},
+			NewSchema().WithDynamicFieldEnabled(true),
+		)
+		s.NoError(err)
+		s.Equal(1, len(columns))
+	})
+
+	s.Run("dynamic_not_found", func() {
+		_, err := RowsToColumns([]Row{&ValidStruct{}},
+			NewSchema().WithField(
+				NewField().WithName("ID").WithDataType(FieldTypeInt64).WithIsPrimaryKey(true),
+			).WithDynamicFieldEnabled(true),
+		)
+		s.NoError(err)
+	})
+}
+
+func (s *RowsSuite) TestReflectValueCandi() {
+	type DynamicRows struct {
+		Float float32 `json:"float" milvus:"name:float"`
+	}
+
+	cases := []struct {
+		tag       string
+		v         reflect.Value
+		expect    map[string]fieldCandi
+		expectErr bool
+	}{
+		{
+			tag: "MapRow",
+			v: reflect.ValueOf(MapRow(map[string]interface{}{
+				"A": "abd", "B": int64(8),
+			})),
+			expect: map[string]fieldCandi{
+				"A": {
+					name: "A",
+					v:    reflect.ValueOf("abd"),
+				},
+				"B": {
+					name: "B",
+					v:    reflect.ValueOf(int64(8)),
+				},
+			},
+			expectErr: false,
+		},
+		{
+			tag: "StructRow",
+			v: reflect.ValueOf(struct {
+				A string
+				B int64
+			}{A: "abc", B: 16}),
+			expect: map[string]fieldCandi{
+				"A": {
+					name: "A",
+					v:    reflect.ValueOf("abc"),
+				},
+				"B": {
+					name: "B",
+					v:    reflect.ValueOf(int64(16)),
+				},
+			},
+			expectErr: false,
+		},
+		{
+			tag: "StructRow_DuplicateName",
+			v: reflect.ValueOf(struct {
+				A string `milvus:"name:a"`
+				B int64  `milvus:"name:a"`
+			}{A: "abc", B: 16}),
+			expectErr: true,
+		},
+		{
+			tag: "StructRow_EmbedDuplicateName",
+			v: reflect.ValueOf(struct {
+				Int64    int64     `json:"int64" milvus:"name:int64"`
+				Float    float32   `json:"float" milvus:"name:float"`
+				FloatVec []float32 `json:"floatVec" milvus:"name:floatVec"`
+				DynamicRows
+			}{}),
+			expectErr: true,
+		},
+	}
+
+	for _, c := range cases {
+		s.Run(c.tag, func() {
+			r, err := reflectValueCandi(c.v)
+			if c.expectErr {
+				s.Error(err)
+				return
+			}
+			s.NoError(err)
+			s.Equal(len(c.expect), len(r))
+			for k, v := range c.expect {
+				rv, has := r[k]
+				s.Require().True(has)
+				s.Equal(v.name, rv.name)
+			}
+		})
+	}
+}
+
+func TestRows(t *testing.T) {
+	suite.Run(t, new(RowsSuite))
 }

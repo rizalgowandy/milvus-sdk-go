@@ -4,13 +4,13 @@ import (
 	"context"
 	"encoding/csv"
 	"fmt"
-	"github.com/milvus-io/milvus-sdk-go/v2/client"
-	"github.com/milvus-io/milvus-sdk-go/v2/entity"
-	"google.golang.org/grpc"
 	"log"
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/milvus-io/milvus-sdk-go/v2/client"
+	"github.com/milvus-io/milvus-sdk-go/v2/entity"
 )
 
 const (
@@ -21,31 +21,15 @@ const (
 
 func main() {
 	ctx := context.Background()
-	// create user credential if needed
-	c, err := client.NewGrpcClient(ctx, addr)
-	if err != nil {
-		log.Fatal("failed to connect:", err)
-	}
-	users, err := c.ListCredUsers(ctx)
-	registered := false
-	for _, user := range users {
-		if user == username {
-			registered = true
-			break
-		}
-	}
-	if !registered {
-		if err = c.CreateCredential(ctx, username, password); err != nil {
-			log.Fatal("failed to create credential:", err)
-		}
-	}
-	c.Close()
-
-	// client with auth interceptor
-	unaryAuthInterceptor := client.CreateAuthenticationUnaryInterceptor(username, password)
-	streamAuthInterceptor := client.CreateAuthenticationStreamInterceptor(username, password)
-	c, err = client.NewGrpcClient(ctx, addr, grpc.WithInsecure(),
-		grpc.WithUnaryInterceptor(unaryAuthInterceptor), grpc.WithStreamInterceptor(streamAuthInterceptor))
+	// create grpc client that tls is enabled
+	c, err := client.NewClient(
+		ctx,
+		client.Config{
+			Address:  addr,
+			Username: username,
+			Password: password,
+		},
+	)
 	if err != nil {
 		log.Fatal("failed to connect:", err)
 	}
@@ -84,7 +68,7 @@ func main() {
 				Name:     "Vector",
 				DataType: entity.FieldTypeFloatVector,
 				TypeParams: map[string]string{
-					entity.TYPE_PARAM_DIM: "8",
+					entity.TypeParamDim: "8",
 				},
 			},
 		},
@@ -129,6 +113,16 @@ func main() {
 	}
 	log.Println("flush completed")
 
+	// Now add index
+	idx, err := entity.NewIndexIvfFlat(entity.L2, 2)
+	if err != nil {
+		log.Fatal("fail to create ivf flat index:", err.Error())
+	}
+	err = c.CreateIndex(ctx, collectionName, "Vector", idx, false)
+	if err != nil {
+		log.Fatal("fail to create index:", err.Error())
+	}
+
 	// load collection with async=false
 	err = c.LoadCollection(ctx, collectionName, false)
 	if err != nil {
@@ -139,7 +133,7 @@ func main() {
 	searchFilm := films[0] // use first fim to search
 	vector := entity.FloatVector(searchFilm.Vector[:])
 	// Use flat search param
-	sp, _ := entity.NewIndexFlatSearchParam(10)
+	sp, _ := entity.NewIndexFlatSearchParam()
 	sr, err := c.Search(ctx, collectionName, []string{}, "Year > 1990", []string{"ID"}, []entity.Vector{vector}, "Vector",
 		entity.L2, 10, sp)
 	if err != nil {

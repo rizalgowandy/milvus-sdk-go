@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/milvus-io/milvus-sdk-go/v2/internal/proto/schema"
+	schema "github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -42,12 +42,27 @@ func TestIDColumns(t *testing.T) {
 	dataLen := rand.Intn(100) + 1
 	base := rand.Intn(5000) // id start point
 
+	intPKCol := NewSchema().WithField(
+		NewField().WithName("pk").WithIsPrimaryKey(true).WithDataType(FieldTypeInt64),
+	)
+	strPKCol := NewSchema().WithField(
+		NewField().WithName("pk").WithIsPrimaryKey(true).WithDataType(FieldTypeVarChar),
+	)
+
 	t.Run("nil id", func(t *testing.T) {
-		_, err := IDColumns(nil, 0, -1)
-		assert.NotNil(t, err)
+		col, err := IDColumns(intPKCol, nil, 0, -1)
+		assert.NoError(t, err)
+		assert.EqualValues(t, 0, col.Len())
+		col, err = IDColumns(strPKCol, nil, 0, -1)
+		assert.NoError(t, err)
+		assert.EqualValues(t, 0, col.Len())
 		idField := &schema.IDs{}
-		_, err = IDColumns(idField, 0, -1)
-		assert.NotNil(t, err)
+		col, err = IDColumns(intPKCol, idField, 0, -1)
+		assert.NoError(t, err)
+		assert.EqualValues(t, 0, col.Len())
+		col, err = IDColumns(strPKCol, idField, 0, -1)
+		assert.NoError(t, err)
+		assert.EqualValues(t, 0, col.Len())
 	})
 
 	t.Run("int ids", func(t *testing.T) {
@@ -62,12 +77,12 @@ func TestIDColumns(t *testing.T) {
 				},
 			},
 		}
-		column, err := IDColumns(idField, 0, dataLen)
+		column, err := IDColumns(intPKCol, idField, 0, dataLen)
 		assert.Nil(t, err)
 		assert.NotNil(t, column)
 		assert.Equal(t, dataLen, column.Len())
 
-		column, err = IDColumns(idField, 0, -1) // test -1 method
+		column, err = IDColumns(intPKCol, idField, 0, -1) // test -1 method
 		assert.Nil(t, err)
 		assert.NotNil(t, column)
 		assert.Equal(t, dataLen, column.Len())
@@ -84,14 +99,89 @@ func TestIDColumns(t *testing.T) {
 				},
 			},
 		}
-		column, err := IDColumns(idField, 0, dataLen)
+		column, err := IDColumns(strPKCol, idField, 0, dataLen)
 		assert.Nil(t, err)
 		assert.NotNil(t, column)
 		assert.Equal(t, dataLen, column.Len())
 
-		column, err = IDColumns(idField, 0, -1) // test -1 method
+		column, err = IDColumns(strPKCol, idField, 0, -1) // test -1 method
 		assert.Nil(t, err)
 		assert.NotNil(t, column)
 		assert.Equal(t, dataLen, column.Len())
 	})
+}
+
+func TestGetIntData(t *testing.T) {
+	type testCase struct {
+		tag      string
+		fd       *schema.FieldData
+		expectOK bool
+	}
+
+	cases := []testCase{
+		{
+			tag: "normal_IntData",
+			fd: &schema.FieldData{
+				Field: &schema.FieldData_Scalars{
+					Scalars: &schema.ScalarField{
+						Data: &schema.ScalarField_IntData{
+							IntData: &schema.IntArray{Data: []int32{1, 2, 3}},
+						},
+					},
+				},
+			},
+			expectOK: true,
+		},
+		{
+			tag: "empty_LongData",
+			fd: &schema.FieldData{
+				Field: &schema.FieldData_Scalars{
+					Scalars: &schema.ScalarField{
+						Data: &schema.ScalarField_LongData{
+							LongData: &schema.LongArray{Data: nil},
+						},
+					},
+				},
+			},
+			expectOK: true,
+		},
+		{
+			tag: "nonempty_LongData",
+			fd: &schema.FieldData{
+				Field: &schema.FieldData_Scalars{
+					Scalars: &schema.ScalarField{
+						Data: &schema.ScalarField_LongData{
+							LongData: &schema.LongArray{Data: []int64{1, 2, 3}},
+						},
+					},
+				},
+			},
+			expectOK: false,
+		},
+		{
+			tag: "other_data",
+			fd: &schema.FieldData{
+				Field: &schema.FieldData_Scalars{
+					Scalars: &schema.ScalarField{
+						Data: &schema.ScalarField_BoolData{},
+					},
+				},
+			},
+			expectOK: false,
+		},
+		{
+			tag: "vector_data",
+			fd: &schema.FieldData{
+				Field: &schema.FieldData_Vectors{},
+			},
+			expectOK: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.tag, func(t *testing.T) {
+			_, ok := getIntData(tc.fd)
+			assert.Equal(t, tc.expectOK, ok)
+		})
+	}
 }

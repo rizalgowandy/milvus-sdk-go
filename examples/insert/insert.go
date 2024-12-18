@@ -23,7 +23,9 @@ func main() {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 
-	c, err := client.NewGrpcClient(ctx, milvusAddr)
+	c, err := client.NewClient(ctx, client.Config{
+		Address: milvusAddr,
+	})
 	if err != nil {
 		// handling error and exit, to make example simple here
 		log.Fatal("failed to connect to milvus:", err.Error())
@@ -44,34 +46,12 @@ func main() {
 	}
 
 	// define collection schema, see film.csv
-	schema := &entity.Schema{
-		CollectionName: collectionName,
-		Description:    "this is the example collection for inser and search",
-		AutoID:         false,
-		Fields: []*entity.Field{
-			{
-				Name:       "ID",
-				DataType:   entity.FieldTypeInt64, // int64 only for now
-				PrimaryKey: true,
-				AutoID:     false,
-			},
-			{
-				Name:       "Year",
-				DataType:   entity.FieldTypeInt32,
-				PrimaryKey: false,
-				AutoID:     false,
-			},
-			{
-				Name:     "Vector",
-				DataType: entity.FieldTypeFloatVector,
-				TypeParams: map[string]string{
-					entity.TYPE_PARAM_DIM: "8",
-				},
-			},
-		},
-	}
+	schema := entity.NewSchema().WithName(collectionName).WithDescription("this is the example collection for insert and search").
+		WithField(entity.NewField().WithName("ID").WithDataType(entity.FieldTypeInt64).WithIsPrimaryKey(true)).
+		WithField(entity.NewField().WithName("Year").WithDataType(entity.FieldTypeInt32)).
+		WithField(entity.NewField().WithName("Vector").WithDataType(entity.FieldTypeFloatVector).WithDim(8))
 
-	err = c.CreateCollection(ctx, schema, 1) // only 1 shard
+	err = c.CreateCollection(ctx, schema, entity.DefaultShardNumber) // only 1 shard
 	if err != nil {
 		log.Fatal("failed to create collection:", err.Error())
 	}
@@ -111,6 +91,16 @@ func main() {
 	}
 	log.Println("flush completed")
 
+	// Now add index
+	idx, err := entity.NewIndexIvfFlat(entity.L2, 2)
+	if err != nil {
+		log.Fatal("fail to create ivf flat index:", err.Error())
+	}
+	err = c.CreateIndex(ctx, collectionName, "Vector", idx, false)
+	if err != nil {
+		log.Fatal("fail to create index:", err.Error())
+	}
+
 	// load collection with async=false
 	err = c.LoadCollection(ctx, collectionName, false)
 	if err != nil {
@@ -121,7 +111,7 @@ func main() {
 	searchFilm := films[0] // use first fim to search
 	vector := entity.FloatVector(searchFilm.Vector[:])
 	// Use flat search param
-	sp, _ := entity.NewIndexFlatSearchParam(10)
+	sp, _ := entity.NewIndexFlatSearchParam()
 	sr, err := c.Search(ctx, collectionName, []string{}, "Year > 1990", []string{"ID"}, []entity.Vector{vector}, "Vector",
 		entity.L2, 10, sp)
 	if err != nil {

@@ -22,7 +22,9 @@ func main() {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 
-	c, err := client.NewGrpcClient(ctx, milvusAddr)
+	c, err := client.NewClient(ctx, client.Config{
+		Address: milvusAddr,
+	})
 	if err != nil {
 		// handling error and exit, to make example simple here
 		log.Fatal("failed to connect to milvus:", err.Error())
@@ -64,13 +66,13 @@ func main() {
 				Name:     "Vector",
 				DataType: entity.FieldTypeFloatVector,
 				TypeParams: map[string]string{
-					entity.TYPE_PARAM_DIM: "8",
+					entity.TypeParamDim: "8",
 				},
 			},
 		},
 	}
 
-	err = c.CreateCollection(ctx, schema, 1) // only 1 shard
+	err = c.CreateCollection(ctx, schema, entity.DefaultShardNumber)
 	if err != nil {
 		log.Fatal("failed to create collection:", err.Error())
 	}
@@ -117,8 +119,8 @@ func main() {
 	}
 	log.Println("load collection completed")
 
-	//searchFilm := films[0] // use first fim to search
-	//vector := entity.FloatVector(searchFilm.Vector[:])
+	// searchFilm := films[0] // use first fim to search
+	// vector := entity.FloatVector(searchFilm.Vector[:])
 	// Use flat search param
 
 	r, err := c.CalcDistance(ctx, collectionName, []string{}, entity.L2, entity.NewColumnFloatVector("Vector", 8, vectors[0:2]), entity.NewColumnFloatVector("Vector", 8, vectors[3:4]))

@@ -12,48 +12,95 @@
 package entity
 
 import (
-	"github.com/milvus-io/milvus-sdk-go/v2/internal/proto/common"
-	"github.com/milvus-io/milvus-sdk-go/v2/internal/proto/schema"
+	"strconv"
+
+	common "github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
+	schema "github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 )
 
 const (
-	// TYPE_PARAM_DIM is the const for field type param dimension
-	TYPE_PARAM_DIM = "dim"
+	// TypeParamDim is the const for field type param dimension
+	TypeParamDim = "dim"
 
-	// CL_STRONG strong consistency level
-	CL_STRONG ConsistencyLevel = ConsistencyLevel(common.ConsistencyLevel_Strong)
-	// CL_BOUNDED bounded consistency level with default tolerance of 5 seconds
-	CL_BOUNDED ConsistencyLevel = ConsistencyLevel(common.ConsistencyLevel_Bounded)
-	// CL_SESSION session consistency level
-	CL_SESSION ConsistencyLevel = ConsistencyLevel(common.ConsistencyLevel_Session)
-	// CL_EVENTUALLY eventually consistency level
-	CL_EVENTUALLY ConsistencyLevel = ConsistencyLevel(common.ConsistencyLevel_Eventually)
-	// CL_CUSTOMIZED customized consistency level and users pass their own `guarantee_timestamp`.
-	CL_CUSTOMIZED ConsistencyLevel = ConsistencyLevel(common.ConsistencyLevel_Customized)
+	// TypeParamMaxLength is the const for varchar type maximal length
+	TypeParamMaxLength = "max_length"
+
+	// TypeParamMaxCapacity is the const for array type max capacity
+	TypeParamMaxCapacity = `max_capacity`
+
+	// ClStrong strong consistency level
+	ClStrong ConsistencyLevel = ConsistencyLevel(common.ConsistencyLevel_Strong)
+	// ClBounded bounded consistency level with default tolerance of 5 seconds
+	ClBounded ConsistencyLevel = ConsistencyLevel(common.ConsistencyLevel_Bounded)
+	// ClSession session consistency level
+	ClSession ConsistencyLevel = ConsistencyLevel(common.ConsistencyLevel_Session)
+	// ClEvenually eventually consistency level
+	ClEventually ConsistencyLevel = ConsistencyLevel(common.ConsistencyLevel_Eventually)
+	// ClCustomized customized consistency level and users pass their own `guarantee_timestamp`.
+	ClCustomized ConsistencyLevel = ConsistencyLevel(common.ConsistencyLevel_Customized)
 )
 
 // ConsistencyLevel enum type for collection Consistency Level
 type ConsistencyLevel common.ConsistencyLevel
 
-// CommonConsisencyLevel returns corresponding common.ConsisencyLevel
-func (cl ConsistencyLevel) CommonConsisencyLevel() common.ConsistencyLevel {
+// CommonConsistencyLevel returns corresponding common.ConsistencyLevel
+func (cl ConsistencyLevel) CommonConsistencyLevel() common.ConsistencyLevel {
 	return common.ConsistencyLevel(cl)
 }
 
 // Schema represents schema info of collection in milvus
 type Schema struct {
-	CollectionName string
-	Description    string
-	AutoID         bool
-	Fields         []*Field
+	CollectionName     string
+	Description        string
+	AutoID             bool
+	Fields             []*Field
+	EnableDynamicField bool
+	pkField            *Field
+}
+
+// NewSchema creates an empty schema object.
+func NewSchema() *Schema {
+	return &Schema{}
+}
+
+// WithName sets the name value of schema, returns schema itself.
+func (s *Schema) WithName(name string) *Schema {
+	s.CollectionName = name
+	return s
+}
+
+// WithDescription sets the description value of schema, returns schema itself.
+func (s *Schema) WithDescription(desc string) *Schema {
+	s.Description = desc
+	return s
+}
+
+func (s *Schema) WithAutoID(autoID bool) *Schema {
+	s.AutoID = autoID
+	return s
+}
+
+func (s *Schema) WithDynamicFieldEnabled(dynamicEnabled bool) *Schema {
+	s.EnableDynamicField = dynamicEnabled
+	return s
+}
+
+// WithField adds a field into schema and returns schema itself.
+func (s *Schema) WithField(f *Field) *Schema {
+	if f.PrimaryKey {
+		s.pkField = f
+	}
+	s.Fields = append(s.Fields, f)
+	return s
 }
 
 // ProtoMessage returns corresponding server.CollectionSchema
 func (s *Schema) ProtoMessage() *schema.CollectionSchema {
 	r := &schema.CollectionSchema{
-		Name:        s.CollectionName,
-		Description: s.Description,
-		AutoID:      s.AutoID,
+		Name:               s.CollectionName,
+		Description:        s.Description,
+		AutoID:             s.AutoID,
+		EnableDynamicField: s.EnableDynamicField,
 	}
 	r.Fields = make([]*schema.FieldSchema, 0, len(s.Fields))
 	for _, field := range s.Fields {
@@ -69,35 +116,209 @@ func (s *Schema) ReadProto(p *schema.CollectionSchema) *Schema {
 	s.CollectionName = p.GetName()
 	s.Fields = make([]*Field, 0, len(p.GetFields()))
 	for _, fp := range p.GetFields() {
-		s.Fields = append(s.Fields, (&Field{}).ReadProto(fp))
+		field := NewField().ReadProto(fp)
+		if field.PrimaryKey {
+			s.pkField = field
+		}
+		s.Fields = append(s.Fields, field)
 	}
+	s.EnableDynamicField = p.GetEnableDynamicField()
 	return s
+}
+
+// PKFieldName returns pk field name for this schema.
+func (s *Schema) PKFieldName() string {
+	if s.pkField == nil {
+		return ""
+	}
+	return s.pkField.Name
+}
+
+// PKField returns PK Field schema for this schema.
+func (s *Schema) PKField() *Field {
+	return s.pkField
 }
 
 // Field represent field schema in milvus
 type Field struct {
-	ID          int64  // field id, generated when collection is created, input value is ignored
-	Name        string // field name
-	PrimaryKey  bool   // is primary key
-	AutoID      bool   // is auto id
-	Description string
-	DataType    FieldType
-	TypeParams  map[string]string
-	IndexParams map[string]string
+	ID              int64  // field id, generated when collection is created, input value is ignored
+	Name            string // field name
+	PrimaryKey      bool   // is primary key
+	AutoID          bool   // is auto id
+	Description     string
+	DataType        FieldType
+	TypeParams      map[string]string
+	IndexParams     map[string]string
+	IsDynamic       bool
+	IsPartitionKey  bool
+	IsClusteringKey bool
+	ElementType     FieldType
+	DefaultValue    *schema.ValueField
+	Nullable        bool
 }
 
-// ProtoMessage generetes corresponding FieldSchema
+// ProtoMessage generates corresponding FieldSchema
 func (f *Field) ProtoMessage() *schema.FieldSchema {
 	return &schema.FieldSchema{
-		FieldID:      f.ID,
-		Name:         f.Name,
-		Description:  f.Description,
-		IsPrimaryKey: f.PrimaryKey,
-		AutoID:       f.AutoID,
-		DataType:     schema.DataType(f.DataType),
-		TypeParams:   MapKvPairs(f.TypeParams),
-		IndexParams:  MapKvPairs(f.IndexParams),
+		FieldID:         f.ID,
+		Name:            f.Name,
+		Description:     f.Description,
+		IsPrimaryKey:    f.PrimaryKey,
+		AutoID:          f.AutoID,
+		DataType:        schema.DataType(f.DataType),
+		TypeParams:      MapKvPairs(f.TypeParams),
+		IndexParams:     MapKvPairs(f.IndexParams),
+		IsDynamic:       f.IsDynamic,
+		IsPartitionKey:  f.IsPartitionKey,
+		IsClusteringKey: f.IsClusteringKey,
+		ElementType:     schema.DataType(f.ElementType),
+		DefaultValue:    f.DefaultValue,
+		Nullable:        f.Nullable,
 	}
+}
+
+// NewField creates a new Field with map initialized.
+func NewField() *Field {
+	return &Field{
+		TypeParams:  make(map[string]string),
+		IndexParams: make(map[string]string),
+	}
+}
+
+func (f *Field) WithName(name string) *Field {
+	f.Name = name
+	return f
+}
+
+func (f *Field) WithDescription(desc string) *Field {
+	f.Description = desc
+	return f
+}
+
+func (f *Field) WithDataType(dataType FieldType) *Field {
+	f.DataType = dataType
+	return f
+}
+
+func (f *Field) WithIsPrimaryKey(isPrimaryKey bool) *Field {
+	f.PrimaryKey = isPrimaryKey
+	return f
+}
+
+func (f *Field) WithIsAutoID(isAutoID bool) *Field {
+	f.AutoID = isAutoID
+	return f
+}
+
+func (f *Field) WithIsDynamic(isDynamic bool) *Field {
+	f.IsDynamic = isDynamic
+	return f
+}
+
+func (f *Field) WithIsPartitionKey(isPartitionKey bool) *Field {
+	f.IsPartitionKey = isPartitionKey
+	return f
+}
+
+func (f *Field) WithIsClusteringKey(isClusteringKey bool) *Field {
+	f.IsClusteringKey = isClusteringKey
+	return f
+}
+
+func (f *Field) WithNullable(nullable bool) *Field {
+	f.Nullable = nullable
+	return f
+}
+
+func (f *Field) WithDefaultValueBool(defaultValue bool) *Field {
+	f.DefaultValue = &schema.ValueField{
+		Data: &schema.ValueField_BoolData{
+			BoolData: defaultValue,
+		},
+	}
+	return f
+}
+
+func (f *Field) WithDefaultValueInt(defaultValue int32) *Field {
+	f.DefaultValue = &schema.ValueField{
+		Data: &schema.ValueField_IntData{
+			IntData: defaultValue,
+		},
+	}
+	return f
+}
+
+func (f *Field) WithDefaultValueLong(defaultValue int64) *Field {
+	f.DefaultValue = &schema.ValueField{
+		Data: &schema.ValueField_LongData{
+			LongData: defaultValue,
+		},
+	}
+	return f
+}
+
+func (f *Field) WithDefaultValueFloat(defaultValue float32) *Field {
+	f.DefaultValue = &schema.ValueField{
+		Data: &schema.ValueField_FloatData{
+			FloatData: defaultValue,
+		},
+	}
+	return f
+}
+
+func (f *Field) WithDefaultValueDouble(defaultValue float64) *Field {
+	f.DefaultValue = &schema.ValueField{
+		Data: &schema.ValueField_DoubleData{
+			DoubleData: defaultValue,
+		},
+	}
+	return f
+}
+
+func (f *Field) WithDefaultValueString(defaultValue string) *Field {
+	f.DefaultValue = &schema.ValueField{
+		Data: &schema.ValueField_StringData{
+			StringData: defaultValue,
+		},
+	}
+	return f
+}
+
+func (f *Field) WithTypeParams(key string, value string) *Field {
+	if f.TypeParams == nil {
+		f.TypeParams = make(map[string]string)
+	}
+	f.TypeParams[key] = value
+	return f
+}
+
+func (f *Field) WithDim(dim int64) *Field {
+	if f.TypeParams == nil {
+		f.TypeParams = make(map[string]string)
+	}
+	f.TypeParams[TypeParamDim] = strconv.FormatInt(dim, 10)
+	return f
+}
+
+func (f *Field) WithMaxLength(maxLen int64) *Field {
+	if f.TypeParams == nil {
+		f.TypeParams = make(map[string]string)
+	}
+	f.TypeParams[TypeParamMaxLength] = strconv.FormatInt(maxLen, 10)
+	return f
+}
+
+func (f *Field) WithElementType(eleType FieldType) *Field {
+	f.ElementType = eleType
+	return f
+}
+
+func (f *Field) WithMaxCapacity(maxCap int64) *Field {
+	if f.TypeParams == nil {
+		f.TypeParams = make(map[string]string)
+	}
+	f.TypeParams[TypeParamMaxCapacity] = strconv.FormatInt(maxCap, 10)
+	return f
 }
 
 // ReadProto parses FieldSchema
@@ -110,6 +331,12 @@ func (f *Field) ReadProto(p *schema.FieldSchema) *Field {
 	f.DataType = FieldType(p.GetDataType())
 	f.TypeParams = KvPairsMap(p.GetTypeParams())
 	f.IndexParams = KvPairsMap(p.GetIndexParams())
+	f.IsDynamic = p.GetIsDynamic()
+	f.IsPartitionKey = p.GetIsPartitionKey()
+	f.IsClusteringKey = p.GetIsClusteringKey()
+	f.ElementType = FieldType(p.GetElementType())
+	f.DefaultValue = p.GetDefaultValue()
+	f.Nullable = p.GetNullable()
 
 	return f
 }
@@ -158,10 +385,20 @@ func (t FieldType) Name() string {
 		return "Double"
 	case FieldTypeString:
 		return "String"
+	case FieldTypeVarChar:
+		return "VarChar"
+	case FieldTypeArray:
+		return "Array"
+	case FieldTypeJSON:
+		return "JSON"
 	case FieldTypeBinaryVector:
 		return "BinaryVector"
 	case FieldTypeFloatVector:
 		return "FloatVector"
+	case FieldTypeFloat16Vector:
+		return "Float16Vector"
+	case FieldTypeBFloat16Vector:
+		return "BFloat16Vector"
 	default:
 		return "undefined"
 	}
@@ -186,10 +423,22 @@ func (t FieldType) String() string {
 		return "float64"
 	case FieldTypeString:
 		return "string"
+	case FieldTypeVarChar:
+		return "string"
+	case FieldTypeArray:
+		return "Array"
+	case FieldTypeJSON:
+		return "JSON"
 	case FieldTypeBinaryVector:
 		return "[]byte"
 	case FieldTypeFloatVector:
 		return "[]float32"
+	case FieldTypeFloat16Vector:
+		return "[]byte"
+	case FieldTypeBFloat16Vector:
+		return "[]byte"
+	case FieldTypeSparseVector:
+		return "[]SparseEmbedding"
 	default:
 		return "undefined"
 	}
@@ -214,15 +463,21 @@ func (t FieldType) PbFieldType() (string, string) {
 		return "Double", "float64"
 	case FieldTypeString:
 		return "String", "string"
+	case FieldTypeVarChar:
+		return "VarChar", "string"
+	case FieldTypeJSON:
+		return "JSON", "JSON"
 	case FieldTypeBinaryVector:
 		return "[]byte", ""
 	case FieldTypeFloatVector:
 		return "[]float32", ""
+	case FieldTypeFloat16Vector:
+		return "[]byte", ""
+	case FieldTypeBFloat16Vector:
+		return "[]byte", ""
 	default:
 		return "undefined", ""
-
 	}
-
 }
 
 // Match schema definition
@@ -237,7 +492,7 @@ const (
 	FieldTypeInt16 FieldType = 3
 	// FieldTypeInt32 field type int32
 	FieldTypeInt32 FieldType = 4
-	// FIeldTypeInt64 field type int64
+	// FieldTypeInt64 field type int64
 	FieldTypeInt64 FieldType = 5
 	// FieldTypeFloat field type float
 	FieldTypeFloat FieldType = 10
@@ -245,8 +500,20 @@ const (
 	FieldTypeDouble FieldType = 11
 	// FieldTypeString field type string
 	FieldTypeString FieldType = 20
+	// FieldTypeVarChar field type varchar
+	FieldTypeVarChar FieldType = 21 // variable-length strings with a specified maximum length
+	// FieldTypeArray field type Array
+	FieldTypeArray FieldType = 22
+	// FieldTypeJSON field type JSON
+	FieldTypeJSON FieldType = 23
 	// FieldTypeBinaryVector field type binary vector
 	FieldTypeBinaryVector FieldType = 100
 	// FieldTypeFloatVector field type float vector
 	FieldTypeFloatVector FieldType = 101
+	// FieldTypeBinaryVector field type float16 vector
+	FieldTypeFloat16Vector FieldType = 102
+	// FieldTypeBinaryVector field type bf16 vector
+	FieldTypeBFloat16Vector FieldType = 103
+	// FieldTypeBinaryVector field type sparse vector
+	FieldTypeSparseVector FieldType = 104
 )

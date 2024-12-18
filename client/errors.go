@@ -12,18 +12,23 @@
 package client
 
 import (
-	"errors"
 	"fmt"
+
+	"github.com/cockroachdb/errors"
 )
 
-// ErrServiceFailed indicates error returns from milvus service
+// ErrServiceFailed indicates error returns from milvus Service
 type ErrServiceFailed error
 
 var (
 	//ErrClientNotReady error indicates client not ready
 	ErrClientNotReady = errors.New("client not ready")
+
 	//ErrStatusNil error indicates response has nil status
 	ErrStatusNil = errors.New("response status is nil")
+
+	// ErrFeatureNotSupported error indicates current server does not support this feature
+	ErrFeatureNotSupported = errors.New("feature not supported")
 )
 
 // ErrCollectionNotExists indicates the collection with specified collection name does not exist

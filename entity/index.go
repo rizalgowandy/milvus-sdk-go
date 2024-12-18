@@ -11,7 +11,7 @@
 
 package entity
 
-import "github.com/milvus-io/milvus-sdk-go/v2/internal/proto/common"
+import common "github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 
 //go:generate go run genidx/genidx.go
 
@@ -32,22 +32,36 @@ const (
 	BinIvfFlat IndexType = "BIN_IVF_FLAT"
 	IvfPQ      IndexType = "IVF_PQ" //faiss
 	IvfSQ8     IndexType = "IVF_SQ8"
-	IvfSQ8H    IndexType = "IVF_SQ8_HYBRID"
-	NSG        IndexType = "NSG"
 	HNSW       IndexType = "HNSW"
-	RHNSWFlat  IndexType = "RHNSW_FLAT"
-	RHNSWPQ    IndexType = "RHNSW_PQ"
-	RHNSWSQ    IndexType = "RHNSW_SQ"
 	IvfHNSW    IndexType = "IVF_HNSW"
-	ANNOY      IndexType = "ANNOY"
-	NGTPANNG   IndexType = "NGT_PANNG"
-	NGTONNG    IndexType = "NGT_ONNG"
+	AUTOINDEX  IndexType = "AUTOINDEX"
+	DISKANN    IndexType = "DISKANN"
+	SCANN      IndexType = "SCANN"
+
+	GPUIvfFlat IndexType = "GPU_IVF_FLAT"
+	GPUIvfPQ   IndexType = "GPU_IVF_PQ"
+
+	GPUCagra      IndexType = "GPU_CAGRA"
+	GPUBruteForce IndexType = "GPU_BRUTE_FORCE"
+
+	// Sparse
+	SparseInverted IndexType = "SPARSE_INVERTED_INDEX"
+	SparseWAND     IndexType = "SPARSE_WAND"
+
+	// DEPRECATED
+	Scalar IndexType = ""
+
+	Trie     IndexType = "Trie"
+	Sorted   IndexType = "STL_SORT"
+	Inverted IndexType = "INVERTED"
+	Bitmap   IndexType = "BITMAP"
 )
 
 // Metric Constants
 const (
 	L2             MetricType = "L2"
 	IP             MetricType = "IP"
+	COSINE         MetricType = "COSINE"
 	HAMMING        MetricType = "HAMMING"
 	JACCARD        MetricType = "JACCARD"
 	TANIMOTO       MetricType = "TANIMOTO"
@@ -57,6 +71,7 @@ const (
 
 // index param field tag
 const (
+	tParams     = `params`
 	tIndexType  = `index_type`
 	tMetricType = `metric_type`
 )
@@ -72,6 +87,39 @@ type Index interface {
 type SearchParam interface {
 	// returns parameters for search/query
 	Params() map[string]interface{}
+	AddRadius(radius float64)
+	AddRangeFilter(rangeFilter float64)
+	AddPageRetainOrder(pageRetainOrder bool)
+}
+
+type baseSearchParams struct {
+	params map[string]interface{}
+}
+
+func (sp *baseSearchParams) Params() map[string]interface{} {
+	params := make(map[string]interface{})
+	for k, v := range sp.params {
+		params[k] = v
+	}
+	return params
+}
+
+func (sp *baseSearchParams) AddRadius(radius float64) {
+	sp.params["radius"] = radius
+}
+
+func (sp *baseSearchParams) AddRangeFilter(rangeFilter float64) {
+	sp.params["range_filter"] = rangeFilter
+}
+
+func (sp *baseSearchParams) AddPageRetainOrder(pageRetainOrder bool) {
+	sp.params["page_retain_order"] = pageRetainOrder
+}
+
+func newBaseSearchParams() baseSearchParams {
+	return baseSearchParams{
+		params: make(map[string]interface{}),
+	}
 }
 
 type baseIndex struct {
@@ -89,25 +137,6 @@ func (b baseIndex) IndexType() IndexType {
 	return b.it
 }
 
-type flatIndex struct {
-	baseIndex
-	m MetricType
-}
-
-func (f flatIndex) Params() map[string]string {
-	return map[string]string{
-		tIndexType:  string(Flat),
-		tMetricType: string(f.m),
-	}
-}
-
-func NewFlatIndex(name string, m MetricType) Index {
-	return flatIndex{
-		baseIndex: baseIndex{it: Flat, name: name},
-		m:         m,
-	}
-}
-
 // GenericIndex index struct for general usage
 // no constraint for index is applied
 type GenericIndex struct {
@@ -117,8 +146,9 @@ type GenericIndex struct {
 
 // Params implements Index
 func (gi GenericIndex) Params() map[string]string {
-	m := map[string]string{
-		tIndexType: string(gi.IndexType()),
+	m := make(map[string]string)
+	if gi.baseIndex.it != "" {
+		m[tIndexType] = string(gi.IndexType())
 	}
 	for k, v := range gi.params {
 		m[k] = v

@@ -12,6 +12,12 @@
 // Package entity defines entities used in sdk
 package entity
 
+// DefaultShardNumber const value for using Milvus default shard number.
+const DefaultShardNumber int32 = 0
+
+// DefaultConsistencyLevel const value for using Milvus default consistency level setting.
+const DefaultConsistencyLevel ConsistencyLevel = ClBounded
+
 // Collection represent collection meta in Milvus
 type Collection struct {
 	ID               int64   // collection id
@@ -21,6 +27,8 @@ type Collection struct {
 	VirtualChannels  []string
 	Loaded           bool
 	ConsistencyLevel ConsistencyLevel
+	ShardNum         int32
+	Properties       map[string]string
 }
 
 // Partition represent partition meta in Milvus

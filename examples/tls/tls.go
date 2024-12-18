@@ -37,7 +37,7 @@ func main() {
 	certPool := x509.NewCertPool()
 	ca, err := os.ReadFile("../cert/ca.pem")
 	if err != nil {
-		log.Fatalf("ioutil.ReadFile err: %v", err)
+		log.Fatalf("os.ReadFile err: %v", err)
 	}
 
 	if ok := certPool.AppendCertsFromPEM(ca); !ok {
@@ -51,7 +51,10 @@ func main() {
 		MinVersion:   tls.VersionTLS13,
 	})
 
-	c, err := client.NewGrpcClient(ctx, milvusAddr, grpc.WithTransportCredentials(creds))
+	c, err := client.NewClient(ctx, client.Config{
+		Address:     milvusAddr,
+		DialOptions: []grpc.DialOption{grpc.WithTransportCredentials(creds)},
+	})
 	if err != nil {
 		// handling error and exit, to make example simple here
 		log.Fatal("failed to connect to milvus:", err.Error())
@@ -93,13 +96,13 @@ func main() {
 				Name:     "Vector",
 				DataType: entity.FieldTypeFloatVector,
 				TypeParams: map[string]string{
-					entity.TYPE_PARAM_DIM: "8",
+					entity.TypeParamDim: "8",
 				},
 			},
 		},
 	}
 
-	err = c.CreateCollection(ctx, schema, 1) // only 1 shard
+	err = c.CreateCollection(ctx, schema, entity.DefaultShardNumber)
 	if err != nil {
 		log.Fatal("failed to create collection:", err.Error())
 	}
@@ -139,6 +142,16 @@ func main() {
 	}
 	log.Println("flush completed")
 
+	// Now add index
+	idx, err := entity.NewIndexIvfFlat(entity.L2, 2)
+	if err != nil {
+		log.Fatal("fail to create ivf flat index:", err.Error())
+	}
+	err = c.CreateIndex(ctx, collectionName, "Vector", idx, false)
+	if err != nil {
+		log.Fatal("fail to create index:", err.Error())
+	}
+
 	// load collection with async=false
 	err = c.LoadCollection(ctx, collectionName, false)
 	if err != nil {
@@ -149,7 +162,7 @@ func main() {
 	searchFilm := films[0] // use first fim to search
 	vector := entity.FloatVector(searchFilm.Vector[:])
 	// Use flat search param
-	sp, _ := entity.NewIndexFlatSearchParam(10)
+	sp, _ := entity.NewIndexFlatSearchParam()
 	sr, err := c.Search(ctx, collectionName, []string{}, "Year > 1990", []string{"ID"}, []entity.Vector{vector}, "Vector",
 		entity.L2, 10, sp)
 	if err != nil {

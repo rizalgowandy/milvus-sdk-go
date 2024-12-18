@@ -12,26 +12,34 @@
 package entity
 
 import (
-	"errors"
+	"encoding/json"
 	"fmt"
 	"go/ast"
 	"reflect"
 	"strconv"
 	"strings"
+
+	"github.com/cockroachdb/errors"
 )
 
 const (
 	// MilvusTag struct tag const for milvus row based struct
 	MilvusTag = `milvus`
 
+	// MilvusSkipTagValue struct tag const for skip this field.
+	MilvusSkipTagValue = `-`
+
 	// MilvusTagSep struct tag const for attribute separator
 	MilvusTagSep = `;`
 
-	//MilvusTagName struct tag const for field name
+	// MilvusTagName struct tag const for field name
 	MilvusTagName = `NAME`
 
 	// VectorDimTag struct tag const for vector dimension
 	VectorDimTag = `DIM`
+
+	// VectorTypeTag struct tag const for binary vector type
+	VectorTypeTag = `VECTOR_TYPE`
 
 	// MilvusPrimaryKey struct tag const for primary key indicator
 	MilvusPrimaryKey = `PRIMARY_KEY`
@@ -48,6 +56,21 @@ type Row interface {
 	Collection() string
 	Partition() string
 	Description() string
+}
+
+// MapRow is the alias type for map[string]interface{} implementing `Row` inteface with empty methods.
+type MapRow map[string]interface{}
+
+func (mr MapRow) Collection() string {
+	return ""
+}
+
+func (mr MapRow) Partition() string {
+	return ""
+}
+
+func (mr MapRow) Description() string {
+	return ""
 }
 
 // RowBase row base, returns default collection, partition name which is empty string
@@ -70,16 +93,20 @@ func (b RowBase) Description() string {
 	return ""
 }
 
-// ParseSchema parse Schema from row interface
-func ParseSchema(r Row) (*Schema, error) {
-	sch := &Schema{
-		CollectionName: r.Collection(),
-		Description:    r.Description(),
-	}
+// ParseSchemaAny parses schema from interface{}.
+func ParseSchemaAny(r interface{}) (*Schema, error) {
+	sch := &Schema{}
 	t := reflect.TypeOf(r)
 	if t.Kind() == reflect.Array || t.Kind() == reflect.Slice || t.Kind() == reflect.Ptr {
 		t = t.Elem()
 	}
+
+	// MapRow is not supported for schema definition
+	// TODO add PrimaryKey() interface later
+	if t.Kind() == reflect.Map {
+		return nil, fmt.Errorf("map row is not supported for schema definition")
+	}
+
 	if t.Kind() != reflect.Struct {
 		return nil, fmt.Errorf("unsupported data type: %+v", r)
 	}
@@ -107,7 +134,11 @@ func ParseSchema(r Row) (*Schema, error) {
 			ft = ft.Elem()
 		}
 		fv := reflect.New(ft)
-		tagSettings := ParseTagSetting(f.Tag.Get(MilvusTag), MilvusTagSep)
+		tag := f.Tag.Get(MilvusTag)
+		if tag == MilvusSkipTagValue {
+			continue
+		}
+		tagSettings := ParseTagSetting(tag, MilvusTagSep)
 		if _, has := tagSettings[MilvusPrimaryKey]; has {
 			field.PrimaryKey = true
 		}
@@ -140,14 +171,14 @@ func ParseSchema(r Row) (*Schema, error) {
 			switch elemType.Kind() {
 			case reflect.Uint8:
 				field.DataType = FieldTypeBinaryVector
-				//TODO maybe override by tag settings, when dim is not multiplier of 8
+				// TODO maybe override by tag settings, when dim is not multiplier of 8
 				field.TypeParams = map[string]string{
-					TYPE_PARAM_DIM: strconv.FormatInt(int64(arrayLen*8), 10),
+					TypeParamDim: strconv.FormatInt(int64(arrayLen*8), 10),
 				}
 			case reflect.Float32:
 				field.DataType = FieldTypeFloatVector
 				field.TypeParams = map[string]string{
-					TYPE_PARAM_DIM: strconv.FormatInt(int64(arrayLen), 10),
+					TypeParamDim: strconv.FormatInt(int64(arrayLen), 10),
 				}
 			default:
 				return nil, fmt.Errorf("field %s is array of %v, which is not supported", f.Name, elemType)
@@ -165,12 +196,19 @@ func ParseSchema(r Row) (*Schema, error) {
 				return nil, fmt.Errorf("dim value %d is out of range", dim)
 			}
 			field.TypeParams = map[string]string{
-				TYPE_PARAM_DIM: dimStr,
+				TypeParamDim: dimStr,
 			}
 			elemType := ft.Elem()
 			switch elemType.Kind() {
-			case reflect.Uint8: // []byte!
-				field.DataType = FieldTypeBinaryVector
+			case reflect.Uint8: // []byte, could be BinaryVector, fp16, bf 6
+				switch tagSettings[VectorTypeTag] {
+				case "fp16":
+					field.DataType = FieldTypeFloat16Vector
+				case "bf16":
+					field.DataType = FieldTypeBFloat16Vector
+				default:
+					field.DataType = FieldTypeBinaryVector
+				}
 			case reflect.Float32:
 				field.DataType = FieldTypeFloatVector
 			default:
@@ -183,6 +221,21 @@ func ParseSchema(r Row) (*Schema, error) {
 	}
 
 	return sch, nil
+}
+
+// ParseSchema parse Schema from row interface
+func ParseSchema(r Row) (*Schema, error) {
+	schema, err := ParseSchemaAny(r)
+	if err != nil {
+		return nil, err
+	}
+	if r.Collection() != "" {
+		schema.CollectionName = r.Collection()
+	}
+	if schema.Description != "" {
+		schema.Description = r.Description()
+	}
+	return schema, nil
 }
 
 // ParseTagSetting parses struct tag into map settings
@@ -217,8 +270,7 @@ func ParseTagSetting(str string, sep string) map[string]string {
 	return settings
 }
 
-// RowsToColumns rows to columns
-func RowsToColumns(rows []Row, schemas ...*Schema) ([]Column, error) {
+func AnyToColumns(rows []interface{}, schemas ...*Schema) ([]Column, error) {
 	rowsLen := len(rows)
 	if rowsLen == 0 {
 		return []Column{}, errors.New("0 length column")
@@ -228,52 +280,112 @@ func RowsToColumns(rows []Row, schemas ...*Schema) ([]Column, error) {
 	var err error
 	// if schema not provided, try to parse from row
 	if len(schemas) == 0 {
-		sch, err = ParseSchema(rows[0])
+		sch, err = ParseSchemaAny(rows[0])
+		if err != nil {
+			return []Column{}, err
+		}
 	} else {
 		// use first schema provided
 		sch = schemas[0]
 	}
-	if err != nil {
-		return []Column{}, err
-	}
+
+	isDynamic := sch.EnableDynamicField
+	var dynamicCol *ColumnJSONBytes
+
 	nameColumns := make(map[string]Column)
 	for _, field := range sch.Fields {
+		// skip auto id pk field
+		if field.PrimaryKey && field.AutoID {
+			continue
+		}
 		switch field.DataType {
 		case FieldTypeBool:
+			var col *ColumnBool
 			data := make([]bool, 0, rowsLen)
-			col := NewColumnBool(field.Name, data)
+			if field.Nullable {
+				validData := make([]bool, 0, rowsLen)
+				col = NewNullableColumnBool(field.Name, data, validData)
+			} else {
+				col = NewColumnBool(field.Name, data)
+			}
 			nameColumns[field.Name] = col
 		case FieldTypeInt8:
+			var col *ColumnInt8
 			data := make([]int8, 0, rowsLen)
-			col := NewColumnInt8(field.Name, data)
+			if field.Nullable {
+				validData := make([]bool, 0, rowsLen)
+				col = NewNullableColumnInt8(field.Name, data, validData)
+			} else {
+				col = NewColumnInt8(field.Name, data)
+			}
 			nameColumns[field.Name] = col
 		case FieldTypeInt16:
+			var col *ColumnInt16
 			data := make([]int16, 0, rowsLen)
-			col := NewColumnInt16(field.Name, data)
+			if field.Nullable {
+				validData := make([]bool, 0, rowsLen)
+				col = NewNullableColumnInt16(field.Name, data, validData)
+			} else {
+				col = NewColumnInt16(field.Name, data)
+			}
 			nameColumns[field.Name] = col
 		case FieldTypeInt32:
+			var col *ColumnInt32
 			data := make([]int32, 0, rowsLen)
-			col := NewColumnInt32(field.Name, data)
+			if field.Nullable {
+				validData := make([]bool, 0, rowsLen)
+				col = NewNullableColumnInt32(field.Name, data, validData)
+			} else {
+				col = NewColumnInt32(field.Name, data)
+			}
 			nameColumns[field.Name] = col
 		case FieldTypeInt64:
+			var col *ColumnInt64
 			data := make([]int64, 0, rowsLen)
-			col := NewColumnInt64(field.Name, data)
+			if field.Nullable {
+				validData := make([]bool, 0, rowsLen)
+				col = NewNullableColumnInt64(field.Name, data, validData)
+			} else {
+				col = NewColumnInt64(field.Name, data)
+			}
 			nameColumns[field.Name] = col
 		case FieldTypeFloat:
+			var col *ColumnFloat
 			data := make([]float32, 0, rowsLen)
-			col := NewColumnFloat(field.Name, data)
+			if field.Nullable {
+				validData := make([]bool, 0, rowsLen)
+				col = NewNullableColumnFloat(field.Name, data, validData)
+			} else {
+				col = NewColumnFloat(field.Name, data)
+			}
 			nameColumns[field.Name] = col
 		case FieldTypeDouble:
+			var col *ColumnDouble
 			data := make([]float64, 0, rowsLen)
-			col := NewColumnDouble(field.Name, data)
+			if field.Nullable {
+				validData := make([]bool, 0, rowsLen)
+				col = NewNullableColumnDouble(field.Name, data, validData)
+			} else {
+				col = NewColumnDouble(field.Name, data)
+			}
 			nameColumns[field.Name] = col
-		case FieldTypeString:
+		case FieldTypeString, FieldTypeVarChar:
 			data := make([]string, 0, rowsLen)
 			col := NewColumnString(field.Name, data)
 			nameColumns[field.Name] = col
+		case FieldTypeJSON:
+			data := make([][]byte, 0, rowsLen)
+			col := NewColumnJSONBytes(field.Name, data)
+			nameColumns[field.Name] = col
+		case FieldTypeArray:
+			col := NewArrayColumn(field)
+			if col == nil {
+				return nil, errors.Errorf("unsupported element type %s for Array", field.ElementType.String())
+			}
+			nameColumns[field.Name] = col
 		case FieldTypeFloatVector:
 			data := make([][]float32, 0, rowsLen)
-			dimStr, has := field.TypeParams[TYPE_PARAM_DIM]
+			dimStr, has := field.TypeParams[TypeParamDim]
 			if !has {
 				return []Column{}, errors.New("vector field with no dim")
 			}
@@ -285,7 +397,7 @@ func RowsToColumns(rows []Row, schemas ...*Schema) ([]Column, error) {
 			nameColumns[field.Name] = col
 		case FieldTypeBinaryVector:
 			data := make([][]byte, 0, rowsLen)
-			dimStr, has := field.TypeParams[TYPE_PARAM_DIM]
+			dimStr, has := field.TypeParams[TypeParamDim]
 			if !has {
 				return []Column{}, errors.New("vector field with no dim")
 			}
@@ -295,52 +407,242 @@ func RowsToColumns(rows []Row, schemas ...*Schema) ([]Column, error) {
 			}
 			col := NewColumnBinaryVector(field.Name, int(dim), data)
 			nameColumns[field.Name] = col
+		case FieldTypeFloat16Vector:
+			data := make([][]byte, 0, rowsLen)
+			dimStr, has := field.TypeParams[TypeParamDim]
+			if !has {
+				return []Column{}, errors.New("vector field with no dim")
+			}
+			dim, err := strconv.ParseInt(dimStr, 10, 64)
+			if err != nil {
+				return []Column{}, fmt.Errorf("vector field with bad format dim: %s", err.Error())
+			}
+			col := NewColumnFloat16Vector(field.Name, int(dim), data)
+			nameColumns[field.Name] = col
+		case FieldTypeBFloat16Vector:
+			data := make([][]byte, 0, rowsLen)
+			dimStr, has := field.TypeParams[TypeParamDim]
+			if !has {
+				return []Column{}, errors.New("vector field with no dim")
+			}
+			dim, err := strconv.ParseInt(dimStr, 10, 64)
+			if err != nil {
+				return []Column{}, fmt.Errorf("vector field with bad format dim: %s", err.Error())
+			}
+			col := NewColumnBFloat16Vector(field.Name, int(dim), data)
+			nameColumns[field.Name] = col
+		case FieldTypeSparseVector:
+			data := make([]SparseEmbedding, 0, rowsLen)
+			col := NewColumnSparseVectors(field.Name, data)
+			nameColumns[field.Name] = col
 		}
 	}
+
+	if isDynamic {
+		dynamicCol = NewColumnJSONBytes("", make([][]byte, 0, rowsLen)).WithIsDynamic(true)
+	}
+
 	for _, row := range rows {
 		// collection schema name need not to be same, since receiver could has other names
 		v := reflect.ValueOf(row)
-		if v.Kind() == reflect.Ptr {
-			v = v.Elem()
+		set, err := reflectValueCandi(v)
+		if err != nil {
+			return nil, err
 		}
 
 		for idx, field := range sch.Fields {
-			column := nameColumns[field.Name]
+			// skip dynamic field if visible
+			if isDynamic && field.IsDynamic {
+				continue
+			}
+			// skip auto id pk field
+			if field.PrimaryKey && field.AutoID {
+				// remove pk field from candidates set, avoid adding it into dynamic column
+				delete(set, field.Name)
+				continue
+			}
+			column, ok := nameColumns[field.Name]
+			if !ok {
+				return nil, fmt.Errorf("expected unhandled field %s", field.Name)
+			}
 
-			fv := fieldFromNameTag(v, field.Name)
-			if !fv.IsValid() {
-				return []Column{}, fmt.Errorf("row %d does not has field %s", idx, field.Name)
+			candi, ok := set[field.Name]
+			if !ok {
+				return nil, fmt.Errorf("row %d does not has field %s", idx, field.Name)
 			}
-			if fv.Kind() == reflect.Array { // change to slice
-				fv = fv.Slice(0, fv.Len()-1)
-			}
-			err := column.AppendValue(fv.Interface())
+			err := column.AppendValue(candi.v.Interface())
 			if err != nil {
-				return []Column{}, err
+				return nil, err
 			}
+			delete(set, field.Name)
 		}
 
+		if isDynamic {
+			m := make(map[string]interface{})
+			for name, candi := range set {
+				m[name] = candi.v.Interface()
+			}
+			bs, err := json.Marshal(m)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal dynamic field %w", err)
+			}
+			err = dynamicCol.AppendValue(bs)
+			if err != nil {
+				return nil, fmt.Errorf("failed to append value to dynamic field %w", err)
+			}
+		}
 	}
 	columns := make([]Column, 0, len(nameColumns))
 	for _, column := range nameColumns {
 		columns = append(columns, column)
 	}
+	if isDynamic {
+		columns = append(columns, dynamicCol)
+	}
 	return columns, nil
 }
 
-func fieldFromNameTag(v reflect.Value, name string) reflect.Value {
-	// tag has higher priority
-	for i := 0; i < v.NumField(); i++ {
-		tag := v.Type().Field(i).Tag.Get(MilvusTag)
-		if tag == "" {
-			continue
+func NewArrayColumn(f *Field) Column {
+	switch f.ElementType {
+	case FieldTypeBool:
+		if f.Nullable {
+			return NewNullableColumnBoolArray(f.Name, nil, nil)
 		}
-		settings := ParseTagSetting(tag, MilvusTagSep)
-		fn, has := settings[MilvusTagName]
-		if has && fn == name {
-			return v.Field(i)
+		return NewColumnBoolArray(f.Name, nil)
+
+	case FieldTypeInt8:
+		if f.Nullable {
+			return NewNullableColumnInt8Array(f.Name, nil, nil)
 		}
+		return NewColumnInt8Array(f.Name, nil)
+
+	case FieldTypeInt16:
+		if f.Nullable {
+			return NewNullableColumnInt16Array(f.Name, nil, nil)
+		}
+		return NewColumnInt16Array(f.Name, nil)
+
+	case FieldTypeInt32:
+		if f.Nullable {
+			return NewNullableColumnInt32Array(f.Name, nil, nil)
+		}
+		return NewColumnInt32Array(f.Name, nil)
+
+	case FieldTypeInt64:
+		if f.Nullable {
+			return NewNullableColumnInt64Array(f.Name, nil, nil)
+		}
+		return NewColumnInt64Array(f.Name, nil)
+
+	case FieldTypeFloat:
+		if f.Nullable {
+			return NewNullableColumnFloatArray(f.Name, nil, nil)
+		}
+		return NewColumnFloatArray(f.Name, nil)
+
+	case FieldTypeDouble:
+		if f.Nullable {
+			return NewNullableColumnDoubleArray(f.Name, nil, nil)
+		}
+		return NewColumnDoubleArray(f.Name, nil)
+
+	case FieldTypeVarChar:
+		if f.Nullable {
+			return NewNullableColumnVarCharArray(f.Name, nil, nil)
+		}
+		return NewColumnVarCharArray(f.Name, nil)
+
+	default:
+		return nil
 	}
-	// try use name directly
-	return v.FieldByName(name)
+}
+
+// RowsToColumns rows to columns
+func RowsToColumns(rows []Row, schemas ...*Schema) ([]Column, error) {
+	anys := make([]interface{}, 0, len(rows))
+	for _, row := range rows {
+		anys = append(anys, row)
+	}
+	return AnyToColumns(anys, schemas...)
+}
+
+type fieldCandi struct {
+	name    string
+	v       reflect.Value
+	options map[string]string
+}
+
+func reflectValueCandi(v reflect.Value) (map[string]fieldCandi, error) {
+	if v.Kind() == reflect.Ptr {
+		v = v.Elem()
+	}
+
+	result := make(map[string]fieldCandi)
+	switch v.Kind() {
+	case reflect.Map: // map[string]interface{}
+		iter := v.MapRange()
+		for iter.Next() {
+			key := iter.Key().String()
+			result[key] = fieldCandi{
+				name: key,
+				v:    iter.Value(),
+			}
+		}
+		return result, nil
+	case reflect.Struct:
+		for i := 0; i < v.NumField(); i++ {
+			ft := v.Type().Field(i)
+			// embedded struct
+			if ft.Anonymous && ft.Type.Kind() == reflect.Struct {
+				embedCandidate, err := reflectValueCandi(v.Field(i))
+				if err != nil {
+					return nil, err
+				}
+				for key, candi := range embedCandidate {
+					_, ok := result[key]
+					if ok {
+						return nil, fmt.Errorf("column has duplicated name: %s when parsing field: %s", key, ft.Name)
+					}
+					result[key] = candi
+				}
+				continue
+			}
+
+			name := ft.Name
+			tag, ok := ft.Tag.Lookup(MilvusTag)
+
+			settings := make(map[string]string)
+			if ok {
+				if tag == MilvusSkipTagValue {
+					continue
+				}
+				settings = ParseTagSetting(tag, MilvusTagSep)
+				fn, has := settings[MilvusTagName]
+				if has {
+					// overwrite column to tag name
+					name = fn
+				}
+			}
+			_, ok = result[name]
+			// duplicated
+			if ok {
+				return nil, fmt.Errorf("column has duplicated name: %s when parsing field: %s", name, ft.Name)
+			}
+
+			v := v.Field(i)
+			if v.Kind() == reflect.Array {
+				v = v.Slice(0, v.Len())
+			}
+
+			result[name] = fieldCandi{
+				name:    name,
+				v:       v,
+				options: settings,
+			}
+		}
+
+		return result, nil
+	default:
+		return nil, fmt.Errorf("unsupport row type: %s", v.Kind().String())
+	}
 }
